@@ -3,13 +3,6 @@
  *
  * Each function fetches the broadcaster's page and extracts the current
  * live HLS/AAC stream URL. They all return a Promise<{ id, url, source }>.
- *
- * Strategy per channel:
- *  - Stable public streams (Kan, radio stations): verify the known URL is
- *    still alive with a HEAD request. If it is, return it as-is.
- *  - Ticket-based streams (Keshet 12): fetch the live page and parse the
- *    m3u8 URL out of the page source or the network manifest API.
- *  - CDN streams: HEAD check, fall back to scraping if dead.
  */
 
 const axios   = require('axios');
@@ -22,7 +15,6 @@ const http = axios.create({
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
     'Accept-Language': 'he-IL,he;q=0.9,en-US;q=0.8',
   },
-  // Don't throw on 4xx/5xx — we check status ourselves
   validateStatus: () => true,
 });
 
@@ -58,76 +50,80 @@ function extractM3u8(text) {
 // TV CHANNELS
 // ────────────────────────────────────────────────────────────────────────────
 
-// כאן 11 — official Kan CDN, very stable
+// כאן 11
 async function scrapeKan11() {
-  const known = 'https://kan11.media.kan.org.il/hls/live/2024514/2024514/master.m3u8';
-  if (await isAlive(known)) return { id: 'kan11', url: known, source: 'verified-known' };
-
-  // Fallback: fetch Kan live page and look for HLS URL
-  const res = await get('https://www.kan.org.il/live/');
-  const $   = cheerio.load(res.data);
-  const src = $('video source').attr('src') ||
-              extractM3u8(res.data);
-  if (src) return { id: 'kan11', url: src, source: 'scraped-kan' };
+  const candidates = [
+    'https://kan11w.media.kan.org.il/hls/live/2105694/2105694/master.m3u8',
+    'https://kancdn.medonecdn.net/livehls/oil/kancdn-live/live/kan11/live.livx/playlist.m3u8',
+    'https://kan11.media.kan.org.il/hls/live/2024514/2024514/master.m3u8',
+    'https://kan11sub.media.kan.org.il/hls/live/2024678/2024678/master.m3u8',
+  ];
+  for (const url of candidates) {
+    if (await isAlive(url)) return { id: 'kan11', url, source: 'verified-known' };
+  }
+  // Fallback: scrape Kan live page
+  try {
+    const res = await get('https://www.kan.org.il/live/');
+    const m3u8 = extractM3u8(res.data);
+    if (m3u8) return { id: 'kan11', url: m3u8, source: 'scraped-kan' };
+  } catch {}
   throw new Error('Kan 11 URL not found');
 }
 
-// קשת 12 — Mako, uses expiring ticket tokens
-// We fetch the Mako live page, find the JSON config block that contains
-// the HLS URL including the fresh TICKET parameter.
+// קשת 12 — uses a profile manifest URL that doesn't need a ticket
 async function scrapeKeshet12() {
-  // Try the Mako VOD live API first — returns JSON with the stream URL
-  const apiRes = await get(
-    'https://www.mako.co.il/mako-vod-live-tv/VOD-6540b8dcb64fd31006.htm',
-    { headers: { 'Referer': 'https://www.mako.co.il/' } }
-  );
-
-  // Look for m3u8 URL with optional ticket param in the HTML
-  const m3u8 = extractM3u8(apiRes.data);
-  if (m3u8) return { id: 'keshet12', url: m3u8, source: 'scraped-mako' };
-
-  // Try the Mako player config API
-  const configRes = await get(
-    'https://mass.mako.co.il/ClicksStatistics/entitlementsV2.aspx?et=PermaLinkFile&lp=/mako-vod-live-tv/VOD-6540b8dcb64fd31006.htm&rv=0',
-    { headers: { 'Referer': 'https://www.mako.co.il/' } }
-  );
-  if (configRes.data?.videoUrl) return { id: 'keshet12', url: configRes.data.videoUrl, source: 'mako-api' };
-
-  const m3u8b = extractM3u8(JSON.stringify(configRes.data));
-  if (m3u8b) return { id: 'keshet12', url: m3u8b, source: 'mako-api-parsed' };
-
-  throw new Error('Keshet 12 ticket URL not found — will use cached value');
+  const candidates = [
+    'https://mako-streaming.akamaized.net/stream/hls/live/2033791/k12dvr/profile/5/profileManifest.m3u8?_uid=0&rK=b6',
+    'https://mako-streaming.akamaized.net/n12/hls/live/2103938/k12/index.m3u8',
+    'https://mako-streaming.akamaized.net/direct/hls/live/2033791/k12dvr/index.m3u8',
+  ];
+  for (const url of candidates) {
+    if (await isAlive(url)) return { id: 'keshet12', url, source: 'verified-known' };
+  }
+  throw new Error('Keshet 12 URL not found');
 }
 
 // ערוץ 14
 async function scrapeChannel14() {
-  const known = 'https://channel14-live-consume.immergo.tv/channel14/live/hls/index.m3u8';
-  if (await isAlive(known)) return { id: 'channel14', url: known, source: 'verified-known' };
-
-  // Scrape now14.co.il for a fresh URL
-  const res = await get('https://www.now14.co.il/live');
-  const m3u8 = extractM3u8(res.data);
-  if (m3u8) return { id: 'channel14', url: m3u8, source: 'scraped-now14' };
+  const candidates = [
+    'https://now14-cdn.wizzlv.com/now14/live/hls/index.m3u8',
+    'https://channel14-live-consume.immergo.tv/channel14/live/hls/index.m3u8',
+    'https://vod.c14.co.il/live/hls/index.m3u8',
+  ];
+  for (const url of candidates) {
+    if (await isAlive(url)) return { id: 'channel14', url, source: 'verified-known' };
+  }
+  try {
+    const res = await get('https://www.c14.co.il/live');
+    const m3u8 = extractM3u8(res.data);
+    if (m3u8) return { id: 'channel14', url: m3u8, source: 'scraped-c14' };
+  } catch {}
   throw new Error('Channel 14 URL not found');
 }
 
-// ערוץ 15
+// ערוץ 15 (Reshet 13 / Channel 15)
 async function scrapeChannel15() {
-  const known = 'https://d2xg1g9o5vns8m.cloudfront.net/out/v1/66d4ac8748ce4a9298b4e40e48d1ae2f/index.m3u8';
-  if (await isAlive(known)) return { id: 'channel15', url: known, source: 'verified-known' };
-
-  const res = await get('https://www.15tv.co.il/live');
-  const m3u8 = extractM3u8(res.data);
-  if (m3u8) return { id: 'channel15', url: m3u8, source: 'scraped-15tv' };
+  const candidates = [
+    'https://d15ds134q59udk.cloudfront.net/out/v1/fbba879221d045598540ee783b140fe2/index.m3u8',
+    'https://d1yd8hohnldm33.cloudfront.net/out/v1/19dee23c2cc24f689bd4e1288661ee0c/index.m3u8',
+    'https://d2xg1g9o5vns8m.cloudfront.net/out/v1/66d4ac8748ce4a9298b4e40e48d1ae2f/index.m3u8',
+  ];
+  for (const url of candidates) {
+    if (await isAlive(url)) return { id: 'channel15', url, source: 'verified-known' };
+  }
+  try {
+    const res = await get('https://www.15tv.co.il/live');
+    const m3u8 = extractM3u8(res.data);
+    if (m3u8) return { id: 'channel15', url: m3u8, source: 'scraped-15tv' };
+  } catch {}
   throw new Error('Channel 15 URL not found');
 }
 
 // ────────────────────────────────────────────────────────────────────────────
 // RADIO STATIONS
-// All radio stations use stable AAC/MP3 stream URLs that rarely change.
-// We just HEAD-check them and return the known URL if alive.
 // ────────────────────────────────────────────────────────────────────────────
 
+// גלי צהל
 async function scrapeGalatz() {
   const candidates = [
     'https://glzwizzlv.bynetcdn.com/glz_mp3',
@@ -136,70 +132,63 @@ async function scrapeGalatz() {
   for (const url of candidates) {
     if (await isAlive(url)) return { id: 'galatz', url, source: 'verified-known' };
   }
-  // Scrape Galatz live page
-  const res = await get('https://glz.co.il/live');
-  const m3u8 = extractM3u8(res.data) ||
-    res.data.match(/https?:\/\/[^\s"'<>]+(mp3|aac|stream)[^\s"'<>]*/i)?.[0];
-  if (m3u8) return { id: 'galatz', url: m3u8, source: 'scraped-glz' };
   throw new Error('Galatz URL not found');
 }
 
+// רשת ב
 async function scrapeReshetB() {
   const candidates = [
+    'https://kanbet.media.kan.org.il/hls/live/2024811/2024811/playlist.m3u8',
     'https://kanbet.media.kan.org.il/hls/live/2024811/2024811/kanbet_mp3/chunklist.m3u8',
+    'https://kanliveicy.media.kan.org.il/icy/kanbet_mp3',
     'https://rb3wizzlv.bynetcdn.com/rb3_mp3',
   ];
   for (const url of candidates) {
     if (await isAlive(url)) return { id: 'reshetb', url, source: 'verified-known' };
   }
-  const res = await get('https://www.kan.org.il/radio/reshetbet/');
-  const m3u8 = extractM3u8(res.data);
-  if (m3u8) return { id: 'reshetb', url: m3u8, source: 'scraped-kan' };
   throw new Error('Reshet B URL not found');
 }
 
+// גלי ישראל
 async function scrapeGalei() {
   const candidates = [
-    'https://live.radiodarom.co.il:1935/livegaleyisrael/galiaud1/manifest.m3u8',
     'https://galey-israel.streamgates.net/GaleyIsrael/mp3/icy',
+    'https://icy.streamgates.net/GaleyIsrael/mp3/icy',
+    'https://live.radiodarom.co.il:1935/livegaleyisrael/galiaud1/manifest.m3u8',
   ];
   for (const url of candidates) {
     if (await isAlive(url)) return { id: 'galei', url, source: 'verified-known' };
   }
-  const res = await get('https://www.galey-israel.co.il/live');
-  const m3u8 = extractM3u8(res.data);
-  if (m3u8) return { id: 'galei', url: m3u8, source: 'scraped-galei' };
   throw new Error('Galei Israel URL not found');
 }
 
+// 103FM
 async function scrapeFm103() {
   const candidates = [
+    'https://cdn.cybercdn.live/103FM/Live/icecast.audio',
     'https://cdn88.mediacast.co.il/103fm/103fm_aac/icecast.audio',
-    'https://103fm.streamgates.net/103fm_mp3',
+    'https://103fm.streamgates.net/103fm_aac/icecast.audio',
   ];
   for (const url of candidates) {
     if (await isAlive(url)) return { id: 'fm103', url, source: 'verified-known' };
   }
-  const res = await get('https://www.103fm.co.il/live');
-  const m3u8 = extractM3u8(res.data);
-  if (m3u8) return { id: 'fm103', url: m3u8, source: 'scraped-103fm' };
   throw new Error('103FM URL not found');
 }
 
+// 99FM
 async function scrapeFm99() {
   const candidates = [
     'https://eco-live.mediacast.co.il/99fm_aac',
-    'https://99fm.streamgates.net/99fm_mp3',
+    'https://cdn.cybercdn.live/99FM/Live/icecast.audio',
+    'https://99fm.streamgates.net/99fm_aac/icecast.audio',
   ];
   for (const url of candidates) {
     if (await isAlive(url)) return { id: 'fm99', url, source: 'verified-known' };
   }
-  const res = await get('https://www.99fm.co.il/live');
-  const m3u8 = extractM3u8(res.data);
-  if (m3u8) return { id: 'fm99', url: m3u8, source: 'scraped-99fm' };
   throw new Error('99FM URL not found');
 }
 
+// גלגלץ
 async function scrapeGalgalatz() {
   const candidates = [
     'https://glzwizzlv.bynetcdn.com/glglz_mp3',
@@ -208,27 +197,23 @@ async function scrapeGalgalatz() {
   for (const url of candidates) {
     if (await isAlive(url)) return { id: 'galgalatz', url, source: 'verified-known' };
   }
-  const res = await get('https://glz.co.il/galgalatz');
-  const m3u8 = extractM3u8(res.data) ||
-    res.data.match(/https?:\/\/[^\s"'<>]+(mp3|aac|stream)[^\s"'<>]*/i)?.[0];
-  if (m3u8) return { id: 'galgalatz', url: m3u8, source: 'scraped-glz' };
   throw new Error('Galgalatz URL not found');
 }
 
+// 102FM
 async function scrapeFm102() {
   const candidates = [
     'https://cdn88.mediacast.co.il/102fm-tlv/102fm_aac/icecast.audio',
-    'https://102fm.streamgates.net/102fm_mp3',
+    'https://cdn.cybercdn.live/102FM/Live/icecast.audio',
+    'https://102fm.streamgates.net/102fm_aac/icecast.audio',
   ];
   for (const url of candidates) {
     if (await isAlive(url)) return { id: 'fm102', url, source: 'verified-known' };
   }
-  const res = await get('https://www.102fm.co.il/live');
-  const m3u8 = extractM3u8(res.data);
-  if (m3u8) return { id: 'fm102', url: m3u8, source: 'scraped-102fm' };
   throw new Error('102FM URL not found');
 }
 
+// Radius 100
 async function scrapeRadius100() {
   const candidates = [
     'https://cdn.cybercdn.live/Radios_100FM/Audio/playlist.m3u8',
@@ -237,9 +222,6 @@ async function scrapeRadius100() {
   for (const url of candidates) {
     if (await isAlive(url)) return { id: 'radius100', url, source: 'verified-known' };
   }
-  const res = await get('https://www.radius100.co.il/live');
-  const m3u8 = extractM3u8(res.data);
-  if (m3u8) return { id: 'radius100', url: m3u8, source: 'scraped-radius100' };
   throw new Error('Radius 100 URL not found');
 }
 
